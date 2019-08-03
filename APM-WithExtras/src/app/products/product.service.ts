@@ -7,7 +7,7 @@ import {
   mergeAll, max, reduce, concatMap, delay
 } from 'rxjs/operators';
 
-import { Product, ProductClass } from './product';
+import { Product, ProductClass, statusCode } from './product';
 import { ProductFromAPI } from './product-data-fromAPI';
 import { ProductCategoryService } from '../product-categories/product-category.service';
 import { Supplier, SupplierClass } from '../suppliers/supplier';
@@ -129,6 +129,10 @@ export class ProductService {
       )
     );
 
+  /*
+    Additional examples, not included in the course
+  */
+
   // Suppliers for the selected product
   // Only gets the suppliers it needs
   // switchMap here instead of mergeMap so quickly clicking on the items cancels prior requests.
@@ -142,9 +146,42 @@ export class ProductService {
       tap(suppliers => console.log('product suppliers', JSON.stringify(suppliers)))
     );
 
-  /*
-    Additional examples, not included in the course
-  */
+  // Suppliers for all products
+  // Gets all products and all suppliers and merges them
+  allProductsAndSuppliers$ = combineLatest([
+    this.productsWithCategory$,
+    this.supplierService.suppliers$
+      .pipe(
+        catchError(err => of([] as Supplier[]))
+      )
+  ]).pipe(
+    map(([products, suppliers]) =>
+      products.map(product => ({
+        ...product,
+        suppliers: product.suppliers = suppliers.filter(
+          supplier => product.supplierIds.includes(supplier.id)
+        )
+      }) as Product)
+    )
+  );
+
+  // Suppliers for all products
+  // Gets all products and then the suppliers for each product
+  // (Seems this would be less efficient than allProductsAndSuppliers$)
+  allProductsAndSuppliers2$ = this.productsWithCategory$
+    .pipe(
+      switchMap(products => forkJoin(
+        products.map(product =>
+          forkJoin(product.supplierIds.map(supplierId => this.http.get<Supplier>(`${this.suppliersUrl}/${supplierId}`)))
+            .pipe(
+              map(suppliers => ({
+                ...product,
+                suppliers: suppliers
+              } as Product))
+            )
+        ))
+      )
+    );
 
   // Retrieve products and map to increase price using mergeMap
   productsWithIncreasedPrice$ = this.productsWithCategory$
@@ -247,6 +284,71 @@ export class ProductService {
       concatMap(item => of(item).pipe(delay(500))),
       catchError(this.handleError)
     );
+
+  // Action Stream for adding/updating/deleting products
+  private productModifiedSubject = new Subject<Product>();
+  productModifiedAction$ = this.productModifiedSubject.asObservable();
+
+  // Save the product via http
+  // And then modify the full list of products with scan.
+  productsWithCRUD$ = merge(
+    this.productsWithCategory$,
+    this.productModifiedAction$
+      .pipe(
+        concatMap(product => this.saveProduct(product)),
+      ))
+    .pipe(
+      scan((products: Product[], product: Product) => this.modifyProducts(products, product)),
+      shareReplay(1)
+    );
+
+  // Support methods
+  // Save the product to the backend server
+  // NOTE: This could be broken into three additional methods.
+  saveProduct(product: Product) {
+    if (product.status === statusCode.Added) {
+      product.id = null;
+      return this.http.post<Product>(this.productsUrl, product, { headers: this.headers })
+        .pipe(
+          tap(data => console.log('Created product', JSON.stringify(data))),
+          catchError(this.handleError)
+        );
+    }
+    if (product.status === statusCode.Deleted) {
+      const url = `${this.productsUrl}/${product.id}`;
+      return this.http.delete<Product>(url, { headers: this.headers })
+        .pipe(
+          tap(data => console.log('Deleted product', product)),
+          // return the original product
+          map(() => product),
+          catchError(this.handleError)
+        );
+    }
+    if (product.status === statusCode.Updated) {
+      const url = `${this.productsUrl}/${product.id}`;
+      return this.http.put<Product>(url, product, { headers: this.headers })
+        .pipe(
+          tap(data => console.log('Updated Product: ' + JSON.stringify(product))),
+          // return the original product
+          map(() => product),
+          catchError(this.handleError)
+        );
+    }
+  }
+
+  // Modify the array of products
+  modifyProducts(products: Product[], product: Product) {
+    console.log(product);
+    if (product.status === statusCode.Added) {
+      return [...products, product];
+    }
+    if (product.status === statusCode.Deleted) {
+      return products.filter(p => p.id !== product.id);
+    }
+    if (product.status === statusCode.Updated) {
+      return products.map(p => p.id === product.id ? { ...product } : p);
+    }
+  }
   /* END */
 
   constructor(private http: HttpClient,
@@ -254,6 +356,8 @@ export class ProductService {
               private supplierService: SupplierService) {
     // To try out each of the additional examples
     // (which are not currently bound in the UI)
+    // this.allProductsAndSuppliers$.subscribe(console.log);
+    // this.allProductsAndSuppliers2$.subscribe(console.log);
     // this.productsWithIncreasedPrice$.subscribe(console.log);
     // this.productsFromAPI1$.subscribe(console.log);
     // this.productsFromAPI2$.subscribe(console.log);
@@ -267,6 +371,25 @@ export class ProductService {
   addProduct(newProduct?: Product) {
     newProduct = newProduct || this.fakeProduct();
     this.productInsertedSubject.next(newProduct);
+
+    // Alternate technique
+    newProduct.status = statusCode.Added;
+    this.productModifiedSubject.next(newProduct);
+  }
+
+  deleteProduct(selectedProduct: Product) {
+    // Update a copy of the selected product
+    const deletedProduct = { ...selectedProduct };
+    deletedProduct.status = statusCode.Deleted;
+    this.productModifiedSubject.next(deletedProduct);
+  }
+
+  updateProduct(selectedProduct: Product) {
+    // Update a copy of the selected product
+    const updatedProduct = { ...selectedProduct };
+    updatedProduct.quantityInStock += 1;
+    updatedProduct.status = statusCode.Updated;
+    this.productModifiedSubject.next(updatedProduct);
   }
 
   // Change the selected product
