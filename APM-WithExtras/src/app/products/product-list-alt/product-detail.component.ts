@@ -39,6 +39,10 @@ export class ProductDetailComponent {
         return EMPTY;
       }));
 
+  // Whether data is currently loading
+  // NOTE: Could also display a loading indicator icon while loading.
+  isLoading$ = this.productService.isLoadingAction$;
+  
   // Create a combined stream with the data used in the view
   // Use filter to skip if the product is null
   vm$ = combineLatest([

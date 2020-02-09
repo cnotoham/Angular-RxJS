@@ -7,7 +7,7 @@ import {
   mergeAll, max, reduce, concatMap, delay
 } from 'rxjs/operators';
 
-import { Product, ProductClass, statusCode } from './product';
+import { Product, ProductClass, StatusCode } from './product';
 import { ProductFromAPI } from './product-data-fromAPI';
 import { ProductCategoryService } from '../product-categories/product-category.service';
 import { Supplier, SupplierClass } from '../suppliers/supplier';
@@ -26,6 +26,18 @@ export class ProductService {
       tap(data => console.log('Products', JSON.stringify(data))),
       catchError(this.handleError)
     );
+
+  // To support a refresh feature
+  private refresh = new BehaviorSubject<boolean>(true);
+
+  products2$ = this.refresh
+    .pipe(
+      mergeMap(() => this.http.get<Product[]>(this.productsUrl)
+        .pipe(
+          tap(data => console.log('Products', JSON.stringify(data))),
+          catchError(this.handleError)
+        )
+      ));
 
   // Combine products with categories
   // Map to the revised shape.
@@ -140,10 +152,28 @@ export class ProductService {
   selectedProductSuppliers3$ = this.selectedProduct$
     .pipe(
       filter(selectedProduct => Boolean(selectedProduct)),
+      tap(product => console.log('product', JSON.stringify(product))),
       switchMap(selectedProduct =>
         forkJoin(selectedProduct.supplierIds.map(supplierId => this.http.get<Supplier>(`${this.suppliersUrl}/${supplierId}`)))
       ),
-      tap(suppliers => console.log('product suppliers', JSON.stringify(suppliers)))
+      tap(suppliers => console.log('product suppliers', JSON.stringify(suppliers))),
+    );
+
+  // Action stream for loading
+  private isLoadingSubject = new BehaviorSubject<boolean>(false);
+  isLoadingAction$ = this.isLoadingSubject.asObservable();
+
+  // Suppliers for the selected product with the loading action stream
+  selectedProductSuppliers4$ = this.selectedProduct$
+    .pipe(
+      filter(selectedProduct => Boolean(selectedProduct)),
+      tap(() => this.isLoadingSubject.next(true)),
+      tap(product => console.log('product', JSON.stringify(product))),
+      switchMap(selectedProduct =>
+        forkJoin(selectedProduct.supplierIds.map(supplierId => this.http.get<Supplier>(`${this.suppliersUrl}/${supplierId}`)))
+      ),
+      tap(suppliers => console.log('product suppliers', JSON.stringify(suppliers))),
+      tap(() => this.isLoadingSubject.next(false))
     );
 
   // Suppliers for all products
@@ -280,8 +310,8 @@ export class ProductService {
   // Emits one product at a time with a delay
   productsOneByOne$ = this.products$
     .pipe(
-      mergeMap(item => item),
-      concatMap(item => of(item).pipe(delay(500))),
+      mergeMap(products => products),  // Flatten the array
+      concatMap(product => of(product).pipe(delay(500))),
       catchError(this.handleError)
     );
 
@@ -306,7 +336,7 @@ export class ProductService {
   // Save the product to the backend server
   // NOTE: This could be broken into three additional methods.
   saveProduct(product: Product) {
-    if (product.status === statusCode.Added) {
+    if (product.status === StatusCode.Added) {
       product.id = null;
       return this.http.post<Product>(this.productsUrl, product, { headers: this.headers })
         .pipe(
@@ -314,17 +344,17 @@ export class ProductService {
           catchError(this.handleError)
         );
     }
-    if (product.status === statusCode.Deleted) {
+    if (product.status === StatusCode.Deleted) {
       const url = `${this.productsUrl}/${product.id}`;
       return this.http.delete<Product>(url, { headers: this.headers })
         .pipe(
           tap(data => console.log('Deleted product', product)),
-          // return the original product
+          // Return the original product so it can be removed from the array
           map(() => product),
           catchError(this.handleError)
         );
     }
-    if (product.status === statusCode.Updated) {
+    if (product.status === StatusCode.Updated) {
       const url = `${this.productsUrl}/${product.id}`;
       return this.http.put<Product>(url, product, { headers: this.headers })
         .pipe(
@@ -338,22 +368,28 @@ export class ProductService {
 
   // Modify the array of products
   modifyProducts(products: Product[], product: Product) {
-    console.log(product);
-    if (product.status === statusCode.Added) {
-      return [...products, product];
+    if (product.status === StatusCode.Added) {
+      // Return a new array from the array of products + new product
+      return [
+        ...products,
+        { ...product, status: StatusCode.Unchanged }
+      ];
     }
-    if (product.status === statusCode.Deleted) {
+    if (product.status === StatusCode.Deleted) {
+      // Filter out the deleted product
       return products.filter(p => p.id !== product.id);
     }
-    if (product.status === statusCode.Updated) {
-      return products.map(p => p.id === product.id ? { ...product } : p);
+    if (product.status === StatusCode.Updated) {
+      // Return a new array with the updated product replaced
+      return products.map(p => p.id === product.id ?
+        { ...product, status: StatusCode.Unchanged } : p);
     }
   }
   /* END */
 
   constructor(private http: HttpClient,
-              private productCategoryService: ProductCategoryService,
-              private supplierService: SupplierService) {
+    private productCategoryService: ProductCategoryService,
+    private supplierService: SupplierService) {
     // To try out each of the additional examples
     // (which are not currently bound in the UI)
     // this.allProductsAndSuppliers$.subscribe(console.log);
@@ -373,14 +409,14 @@ export class ProductService {
     this.productInsertedSubject.next(newProduct);
 
     // Alternate technique
-    newProduct.status = statusCode.Added;
+    newProduct.status = StatusCode.Added;
     this.productModifiedSubject.next(newProduct);
   }
 
   deleteProduct(selectedProduct: Product) {
     // Update a copy of the selected product
     const deletedProduct = { ...selectedProduct };
-    deletedProduct.status = statusCode.Deleted;
+    deletedProduct.status = StatusCode.Deleted;
     this.productModifiedSubject.next(deletedProduct);
   }
 
@@ -388,13 +424,18 @@ export class ProductService {
     // Update a copy of the selected product
     const updatedProduct = { ...selectedProduct };
     updatedProduct.quantityInStock += 1;
-    updatedProduct.status = statusCode.Updated;
+    updatedProduct.status = StatusCode.Updated;
     this.productModifiedSubject.next(updatedProduct);
   }
 
   // Change the selected product
   selectedProductChanged(selectedProductId: number): void {
     this.productSelectedSubject.next(selectedProductId);
+  }
+
+  // Refresh the data.
+  refreshData(): void {
+    this.refresh.next(true);
   }
 
   private fakeProduct() {
